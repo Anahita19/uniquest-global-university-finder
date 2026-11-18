@@ -138,6 +138,7 @@ export const appRouter = router({
   assistant: router({
     ask: publicProcedure.input(z.object({
       question: z.string().min(1).max(500),
+      language: z.enum(["en", "fa"]).default("en"),
       profile: z.object({
         degreeLevel: z.string().max(64).optional(),
         fieldOfStudy: z.string().max(160).optional(),
@@ -153,7 +154,7 @@ export const appRouter = router({
       try {
         const response = await invokeLLM({
           messages: [
-            { role: "system", content: "You are UniQuest, a cautious international admissions assistant. Use only the provided context, never guarantee admission, and explicitly tell the student to verify current official sources for fees and deadlines. Keep answers concise and actionable." },
+            { role: "system", content: input.language === "fa" ? "شما دستیار پذیرش بین‌المللی UniQuest هستید. فقط از زمینه ارائه‌شده استفاده کنید، هرگز پذیرش را تضمین نکنید، و به دانشجو بگویید شهریه و مهلت‌ها را در منابع رسمی بررسی کند. پاسخ را کوتاه، کاربردی و به زبان فارسی بنویسید. نام رسمی دانشگاه‌ها، رشته‌ها و بورسیه‌ها را به شکل اصلی نگه دارید." : "You are UniQuest, a cautious international admissions assistant. Use only the provided context, never guarantee admission, and explicitly tell the student to verify current official sources for fees and deadlines. Keep answers concise and actionable in English. Preserve official university, programme, and scholarship names." },
             { role: "user", content: `Student context: ${JSON.stringify(profile)}. Current source-linked options: ${programMatches.map(item => `${item.university} — ${item.program} — ${item.tier} — ${item.tuition} — ${item.deadline}`).join("; ")}\nQuestion: ${input.question}` },
           ],
           maxTokens: 450,
@@ -166,10 +167,10 @@ export const appRouter = router({
         console.warn("[Assistant] Live LLM unavailable; returning transparent fallback", error);
       }
       return {
-        answer: "Start with the Safe and Good match bands, then verify the official program page for fees, section scores, and the next deadline. This is an indicative guide, not an official acceptance probability.",
+        answer: input.language === "fa" ? "از گزینه‌های Safe و Good match شروع کنید و سپس شهریه، نمره‌های بخش‌های زبان و نزدیک‌ترین مهلت را در صفحه رسمی رشته بررسی کنید. این راهنما تقریبی است و احتمال رسمی پذیرش محسوب نمی‌شود." : "Start with the Safe and Good match bands, then verify the official program page for fees, section scores, and the next deadline. This is an indicative guide, not an official acceptance probability.",
         question: input.question,
         sourceIds: programMatches.slice(0, 2).map(item => item.id),
-        integrationStatus: "Live AI service unavailable in this environment; transparent fallback shown.",
+        integrationStatus: input.language === "fa" ? "سرویس زنده هوش مصنوعی در این محیط در دسترس نیست؛ پاسخ جایگزین شفاف نمایش داده شد." : "Live AI service unavailable in this environment; transparent fallback shown.",
       };
     }),
   }),
