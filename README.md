@@ -8,6 +8,12 @@ UniQuest is an AI-assisted global university finder and scholarship advisor for 
 
 The demo runs on the managed preview environment and may be refreshed or unavailable outside the active project session.
 
+## زبان فارسی / Persian language
+
+UniQuest supports English and Persian modes. Use the `EN` / `FA` switch in the left navigation to change language without losing the local profile, saved shortlist, comparison state, or assessment progress. Persian mode applies RTL layout and translates the primary workspace navigation, shell controls, search placeholder, profile state, footer, and mobile drawer.
+
+The data layer, official university source pages, programme names, scholarship names, and provider responses remain source-linked or provider-native. They are not translated or rewritten in a way that could change admission, fee, deadline, or scholarship meaning.
+
 ## Product highlights
 
 - Responsive admissions intelligence workspace for desktop and mobile.
