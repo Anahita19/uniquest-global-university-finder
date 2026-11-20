@@ -47,12 +47,87 @@ OCR output is treated as a draft for applicant review. Proof-of-funds requiremen
 Key API procedures include:
 
 - `catalog.snapshot`
+- `catalog.search`
 - `profile.get`
 - `profile.saveDraft`
 - `favorites.list`
 - `favorites.set`
 - `documents.uploadAndAnalyze`
 - `assistant.ask`
+
+## Optimized API usage
+
+The application uses tRPC procedures over the Express server. The optimized paths below are public procedures and can be called through the generated tRPC client or through the HTTP endpoint exposed by the tRPC adapter.
+
+### University search: `catalog.search`
+
+Use `catalog.search` for interactive search instead of downloading the entire catalog and filtering it in the browser.
+
+```ts
+const result = await trpc.catalog.search.query({
+  query: "computer science",
+  limit: 20,
+});
+
+// result.query   -> normalized query
+// result.total   -> total number of matching records
+// result.matches -> bounded ProgramMatch[] result set
+```
+
+The input contract is:
+
+```ts
+{
+  query: string; // optional in practice, maximum 120 characters
+  limit?: number; // 1–50, defaults to 20
+}
+```
+
+Search is normalized by trimming surrounding whitespace, collapsing repeated spaces, and applying case-insensitive matching across the university name, programme name, country, and field of study. Results are limited on the server before they reach the client. The UI waits approximately 180ms after the last keystroke before requesting results and keeps the previous result set during a refresh. Client query data is considered fresh for 30 seconds.
+
+An empty query returns the bounded catalog for the requested limit. Use `catalog.snapshot` only when the dashboard needs the related scholarships, deadlines, countries, and catalog metadata as one initial payload.
+
+### AI admissions assistant: `assistant.ask`
+
+Use `assistant.ask` for profile-aware admissions guidance. The request language must be `en` or `fa`; omitted language defaults to English for backward compatibility.
+
+```ts
+const response = await trpc.assistant.ask.mutate({
+  language: "fa",
+  question: "از کدام گزینه برای شروع استفاده کنم؟",
+  profile: {
+    degreeLevel: "Master's Degree",
+    fieldOfStudy: "Computer Science",
+    gpa: "3.55",
+    languageTest: "IELTS Academic",
+    languageScore: "7.0",
+    annualBudget: "18000",
+    budgetCurrency: "EUR",
+    preferredCountries: ["Germany", "Netherlands"],
+  },
+});
+
+// response.answer
+// response.sourceIds
+// response.integrationStatus
+```
+
+The assistant does not send the complete catalog to the model. It ranks a compact set of up to four source-linked programmes using field, preferred-country, fit-score, tuition, deadline, and language signals. The model receives only that reduced context plus the submitted profile and question. The token budget is capped at 320 for quicker responses.
+
+Identical requests are cached in memory for five minutes using language, normalized question, and profile as the cache key. Concurrent identical requests share one in-flight model call. The cache is bounded to 100 entries and is process-local; it is an optimization, not durable conversation storage. A deployment with multiple server instances should add a shared cache only if cross-instance deduplication is required.
+
+If the AI provider is unavailable or returns no usable text, the procedure returns a transparent English or Persian fallback. The fallback is not an admission probability and explicitly directs the user to verify official fees, language requirements, deadlines, and programme pages.
+
+### Performance and safety rules
+
+- Keep search queries short and use the server-side `limit`; do not request 50 records for every autocomplete event.
+- Debounce user input before calling `catalog.search`.
+- Include the selected `language` in every `assistant.ask` request so cached responses cannot cross language boundaries.
+- Do not treat `fitScore`, Safe, Good match, or Ambitious labels as official acceptance probabilities.
+- Keep source URLs and verification states visible in any client that consumes these procedures.
+- Never place provider credentials or database URLs in browser code.
+
+The optimization suite is covered by server tests for query normalization, result limits, language-specific prompts, fallback behavior, cache hits, concurrent request deduplication, and unsupported-language rejection.
 
 ## Local development
 
