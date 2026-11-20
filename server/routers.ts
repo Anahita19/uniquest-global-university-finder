@@ -9,6 +9,34 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { getStudentProfile, listFavorites, registerDocument, saveStudentProfile, setFavorite } from "./db";
 import { storageGetSignedUrl, storagePut } from "./storage";
 
+const ASSISTANT_CACHE_TTL_MS = 5 * 60 * 1000;
+const ASSISTANT_CACHE_MAX_ENTRIES = 100;
+const assistantCache = new Map<string, { expiresAt: number; value: { answer: string; question: string; sourceIds: string[]; integrationStatus: string } }>();
+const assistantInFlight = new Map<string, Promise<{ answer: string; question: string; sourceIds: string[]; integrationStatus: string }>>();
+
+function normalizeQuery(query: string) {
+  return query.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+}
+
+function rankAssistantPrograms(profile: Record<string, unknown>) {
+  const field = String(profile.fieldOfStudy ?? "").toLocaleLowerCase();
+  const countries = Array.isArray(profile.preferredCountries) ? profile.preferredCountries.map(String).map(value => value.toLocaleLowerCase()) : [];
+  return [...programMatches]
+    .map(item => ({ item, score: (field && `${item.field} ${item.program}`.toLocaleLowerCase().includes(field) ? 4 : 0) + (countries.includes(item.country.toLocaleLowerCase()) ? 3 : 0) + item.fitScore / 100 }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4)
+    .map(({ item }) => ({ university: item.university, program: item.program, country: item.country, tier: item.tier, fitScore: item.fitScore, tuition: item.tuition, deadline: item.deadline, language: item.language, officialUrl: item.programUrl }));
+}
+
+function assistantFallback(language: "en" | "fa", question: string) {
+  return {
+    answer: language === "fa" ? "از گزینه‌های Safe و Good match شروع کنید و سپس شهریه، نمره‌های بخش‌های زبان و نزدیک‌ترین مهلت را در صفحه رسمی رشته بررسی کنید. این راهنما تقریبی است و احتمال رسمی پذیرش محسوب نمی‌شود." : "Start with the Safe and Good match bands, then verify the official program page for fees, section scores, and the next deadline. This is an indicative guide, not an official acceptance probability.",
+    question,
+    sourceIds: programMatches.slice(0, 2).map(item => item.id),
+    integrationStatus: language === "fa" ? "سرویس زنده هوش مصنوعی در این محیط در دسترس نیست؛ پاسخ جایگزین شفاف نمایش داده شد." : "Live AI service unavailable in this environment; transparent fallback shown.",
+  } as const;
+}
+
 const profileSchema = z.object({
   fullName: z.string().max(180).optional(),
   nationality: z.string().max(120).optional(),
@@ -49,6 +77,11 @@ export const appRouter = router({
   }),
   catalog: router({
     snapshot: publicProcedure.query(() => ({ matches: programMatches, scholarships, deadlines, countries, meta: catalogMeta })),
+    search: publicProcedure.input(z.object({ query: z.string().max(120).default(""), limit: z.number().int().min(1).max(50).default(20) })).query(({ input }) => {
+      const query = normalizeQuery(input.query);
+      const matches = query ? programMatches.filter(item => normalizeQuery(`${item.university} ${item.program} ${item.country} ${item.field}`).includes(query)) : programMatches;
+      return { matches: matches.slice(0, input.limit), total: matches.length, query };
+    }),
   }),
   profile: router({
     get: protectedProcedure.query(async ({ ctx }) => getStudentProfile(ctx.user.id)),
@@ -151,27 +184,39 @@ export const appRouter = router({
       }).optional(),
     })).mutation(async ({ input }) => {
       const profile = input.profile ?? {};
-      try {
-        const response = await invokeLLM({
-          messages: [
-            { role: "system", content: input.language === "fa" ? "شما دستیار پذیرش بین‌المللی UniQuest هستید. فقط از زمینه ارائه‌شده استفاده کنید، هرگز پذیرش را تضمین نکنید، و به دانشجو بگویید شهریه و مهلت‌ها را در منابع رسمی بررسی کند. پاسخ را کوتاه، کاربردی و به زبان فارسی بنویسید. نام رسمی دانشگاه‌ها، رشته‌ها و بورسیه‌ها را به شکل اصلی نگه دارید." : "You are UniQuest, a cautious international admissions assistant. Use only the provided context, never guarantee admission, and explicitly tell the student to verify current official sources for fees and deadlines. Keep answers concise and actionable in English. Preserve official university, programme, and scholarship names." },
-            { role: "user", content: `Student context: ${JSON.stringify(profile)}. Current source-linked options: ${programMatches.map(item => `${item.university} — ${item.program} — ${item.tier} — ${item.tuition} — ${item.deadline}`).join("; ")}\nQuestion: ${input.question}` },
-          ],
-          maxTokens: 450,
-        });
-        const content = response.choices?.[0]?.message?.content;
-        if (typeof content === "string" && content.trim()) {
-          return { answer: content.trim(), question: input.question, sourceIds: programMatches.slice(0, 2).map(item => item.id), integrationStatus: "Live Manus AI response" };
+      const key = JSON.stringify({ language: input.language, question: normalizeQuery(input.question), profile });
+      const now = Date.now();
+      const cached = assistantCache.get(key);
+      if (cached && cached.expiresAt > now) return cached.value;
+      if (cached) assistantCache.delete(key);
+      const existing = assistantInFlight.get(key);
+      if (existing) return existing;
+
+      const request = (async () => {
+        try {
+          const response = await invokeLLM({
+            messages: [
+              { role: "system", content: input.language === "fa" ? "شما دستیار پذیرش بین‌المللی UniQuest هستید. فقط از زمینه ارائه‌شده استفاده کنید، هرگز پذیرش را تضمین نکنید، و به دانشجو بگویید شهریه و مهلت‌ها را در منابع رسمی بررسی کند. پاسخ را کوتاه، کاربردی و به زبان فارسی بنویسید. نام رسمی دانشگاه‌ها، رشته‌ها و بورسیه‌ها را به شکل اصلی نگه دارید." : "You are UniQuest, a cautious international admissions assistant. Use only the provided context, never guarantee admission, and explicitly tell the student to verify current official sources for fees and deadlines. Keep answers concise and actionable in English. Preserve official university, programme, and scholarship names." },
+              { role: "user", content: `Student context: ${JSON.stringify(profile)}. Top source-linked options: ${JSON.stringify(rankAssistantPrograms(profile))}\nQuestion: ${input.question}` },
+            ],
+            maxTokens: 320,
+          });
+          const content = response.choices?.[0]?.message?.content;
+          if (typeof content === "string" && content.trim()) return { answer: content.trim(), question: input.question, sourceIds: rankAssistantPrograms(profile).slice(0, 2).map(item => programMatches.find(match => match.program === item.program)?.id).filter((id): id is string => Boolean(id)), integrationStatus: "Live Manus AI response" };
+        } catch (error) {
+          console.warn("[Assistant] Live LLM unavailable; returning transparent fallback", error);
         }
-      } catch (error) {
-        console.warn("[Assistant] Live LLM unavailable; returning transparent fallback", error);
+        return assistantFallback(input.language, input.question);
+      })();
+      assistantInFlight.set(key, request);
+      try {
+        const value = await request;
+        assistantCache.set(key, { expiresAt: Date.now() + ASSISTANT_CACHE_TTL_MS, value });
+        while (assistantCache.size > ASSISTANT_CACHE_MAX_ENTRIES) assistantCache.delete(assistantCache.keys().next().value as string);
+        return value;
+      } finally {
+        assistantInFlight.delete(key);
       }
-      return {
-        answer: input.language === "fa" ? "از گزینه‌های Safe و Good match شروع کنید و سپس شهریه، نمره‌های بخش‌های زبان و نزدیک‌ترین مهلت را در صفحه رسمی رشته بررسی کنید. این راهنما تقریبی است و احتمال رسمی پذیرش محسوب نمی‌شود." : "Start with the Safe and Good match bands, then verify the official program page for fees, section scores, and the next deadline. This is an indicative guide, not an official acceptance probability.",
-        question: input.question,
-        sourceIds: programMatches.slice(0, 2).map(item => item.id),
-        integrationStatus: input.language === "fa" ? "سرویس زنده هوش مصنوعی در این محیط در دسترس نیست؛ پاسخ جایگزین شفاف نمایش داده شد." : "Live AI service unavailable in this environment; transparent fallback shown.",
-      };
     }),
   }),
 });

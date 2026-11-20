@@ -115,4 +115,34 @@ describe("assistant language contract", () => {
     })).rejects.toThrow();
     expect(mockedInvokeLLM).not.toHaveBeenCalled();
   });
+
+  it("serves repeated identical requests from the short-lived cache", async () => {
+    mockedInvokeLLM.mockResolvedValue({
+      choices: [{ message: { content: "Cached answer" } }],
+    } as never);
+
+    const input = { language: "en" as const, question: "What is my cached next step?", profile };
+    const first = await caller.assistant.ask(input);
+    const second = await caller.assistant.ask(input);
+
+    expect(first.answer).toBe("Cached answer");
+    expect(second.answer).toBe("Cached answer");
+    expect(mockedInvokeLLM).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates concurrent identical requests while the model is pending", async () => {
+    let resolveResponse: (value: unknown) => void = () => undefined;
+    const pending = new Promise(resolve => { resolveResponse = resolve; });
+    mockedInvokeLLM.mockReturnValue(pending as never);
+
+    const input = { language: "en" as const, question: "What should I prioritize concurrently?", profile };
+    const firstRequest = caller.assistant.ask(input);
+    const secondRequest = caller.assistant.ask(input);
+    resolveResponse({ choices: [{ message: { content: "One shared answer" } }] });
+    const [first, second] = await Promise.all([firstRequest, secondRequest]);
+
+    expect(first.answer).toBe("One shared answer");
+    expect(second.answer).toBe("One shared answer");
+    expect(mockedInvokeLLM).toHaveBeenCalledTimes(1);
+  });
 });

@@ -271,6 +271,9 @@ function MatchDetailModal({ match, onClose }: { match: ProgramMatch; onClose: ()
 export default function Home() {
   const { user } = useAuth();
   const catalogQuery = trpc.catalog.snapshot.useQuery();
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const catalogSearchQuery = trpc.catalog.search.useQuery({ query: searchInput, limit: 20 }, { enabled: searchInput.length > 0, staleTime: 30_000, placeholderData: previous => previous });
   const savedProfileQuery = trpc.profile.get.useQuery(undefined, { enabled: Boolean(user), retry: false });
   const favoritesQuery = trpc.favorites.list.useQuery(undefined, { enabled: Boolean(user), retry: false });
   const saveProfileMutation = trpc.profile.saveDraft.useMutation();
@@ -288,12 +291,11 @@ export default function Home() {
   const [assessmentOpen, setAssessmentOpen] = useState(false);
   const [assessmentStep, setAssessmentStep] = useState(0);
   const [detailMatch, setDetailMatch] = useState<ProgramMatch | null>(null);
-  const [searchTerm, setSearchTerm] = useState("");
   const [assistantInput, setAssistantInput] = useState("");
   const [messages, setMessages] = useState<Array<{ role: "assistant" | "user"; text: string }>>([{ role: "assistant", text: copy(language, "Hi Mina — I’m looking at your Computer Science profile, IELTS 7.0 signal, and €18k annual guardrail. Ask me where to focus next, and I’ll keep the evidence visible.", "سلام مینا — پروفایل Computer Science، نمره IELTS 7.0 و بودجه سالانه €18k شما را بررسی می‌کنم. درباره قدم بعدی سؤال کنید تا شواهد را شفاف نگه داریم.") }]);
 
   const catalog = catalogQuery.data;
-  const matches = useMemo(() => (catalog?.matches ?? fallbackMatches).filter(item => `${item.university} ${item.program} ${item.country}`.toLowerCase().includes(searchTerm.toLowerCase())), [catalog?.matches, searchTerm]);
+  const matches = useMemo(() => searchInput.trim() ? (catalogSearchQuery.data?.matches ?? []) : (catalog?.matches ?? fallbackMatches), [catalog?.matches, catalogSearchQuery.data?.matches, searchInput]);
   const scholarshipsList = catalog?.scholarships ?? fallbackScholarships;
   const deadlinesList = catalog?.deadlines ?? fallbackDeadlines;
 
@@ -301,6 +303,7 @@ export default function Home() {
   useEffect(() => { localStorage.setItem("uniquest-saved", JSON.stringify(savedIds)); }, [savedIds]);
   useEffect(() => { localStorage.setItem("uniquest-compare", JSON.stringify(compareIds)); }, [compareIds]);
   useEffect(() => { localStorage.setItem("uniquest-language", language); document.documentElement.lang = language === "fa" ? "fa" : "en"; }, [language]);
+  useEffect(() => { const timer = window.setTimeout(() => setSearchInput(searchTerm.trim()), 180); return () => window.clearTimeout(timer); }, [searchTerm]);
   useEffect(() => {
     if (!user || !savedProfileQuery.data?.profileData) return;
     const profileData = savedProfileQuery.data.profileData;
